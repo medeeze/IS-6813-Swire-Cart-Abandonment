@@ -24,3 +24,10 @@ One of our biggest challenges was managing missing and inconsistent data in mult
 
 ## What I Learned
 This project really showed me how much the quality of your data impacts any analysis. Once we cleaned and reorganized the data into clearer behavioral segments, the models suddenly improved dramatically. The majority of the time spent in this project was in the data cleaning and order window creation. Spending that effort I also learned how to build features that capture real user behavior instead of just counting events, which helped us understand what customers were actually doing in each order window. 
+
+## File Disclaimer
+For "Modeling Contribution to Group Code", I used parts of the group code necessary to help with the modeling. My individual contribution was the following sections:
+- Missing Data
+- Sampling
+- Logistic Regression
+- Random Forest
