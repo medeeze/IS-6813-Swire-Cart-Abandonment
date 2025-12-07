@@ -1,0 +1,789 @@
+---
+title: "Cart Abandonment EDA"
+author: "Bryson Burr, Claranne Fechter, Carl Freeze"
+date: "October 5, 2025"
+output:
+  pdf_document:
+    toc: true
+  html_document:
+    number_sections: true
+    toc: true
+editor_options:
+  chunk_output_type: console
+---
+
+# Introduction
+
+Swire Coca-Cola has begun the use of its new digital ordering platform, MyCoke360, and it has been running for a little over a year. Cart abandonment is something all businesses have to worry about, and Swire is no different. In this context, cart abandonment is described as when a customer adds items to their cart, but does not make a purchase before their next order date. This abandonment can lead to a loss in revenue. Swire has tasked us with identifying what tends to influence a customer to abandon their carts. The purpose of this notebook is to gain insight about each dataset, specifically the google analytics, sales, and orders data. We want to investigate what variables could influence customers and what actions they take within their carts.
+
+## Questions
+
+1.  What are the most common events?
+2.  What are the most common grouped events?
+3.  What are the most common events by device?
+4.  What are the most common events each day?
+5.  How many events does a customer usually have before purchasing?
+6.  What mobile devices are used the most?
+7.  What events lead into each other?
+8.  What events lead to a purchase but no purchase was made?
+9.  What is the relationship between devices and abandoned carts?
+10. How many orders are there that don’t have anything purchased?
+11. Is there a certain plant that has more no purchase orders than others?
+12. What is the most common frequency distribution?
+13. What is the most common distribution mode?
+14. What is the sales trend like?
+15. Who are the top customers?
+16. What customers or materials have negative revenue?
+17. What is the average time between events?
+18. What is the normal sequence from start to finish?
+
+# Setup
+
+## Package Loading
+
+```{r package loading, message = FALSE}
+library(tidyverse)
+library(dplyr)
+library(skimr)
+library(ggplot2)
+library(janitor)
+library(lubridate)
+library(scales)
+library(pROC)
+library(ranger)
+```
+
+## File Loading
+
+```{r file loading, message = FALSE}
+# load all files
+setwd("C:/Users/freez/Downloads")
+customer <- read_csv("customer.csv")
+cutoff_times <- read_csv("cutoff_times.csv")
+google_analytics <- read_csv("google_analytics.csv")
+material <- read_csv("material.csv")
+operating_hours <- read_csv("operating_hours.csv")
+orders <- read_csv("orders.csv")
+sales <- read_csv("sales.csv")
+visit_plan <- read_csv("visit_plan.csv")
+```
+
+# Data Description
+
+For this project, we have access to 8 datasets in total. The google analytics data contains specific actions taken by the customers on the website. Orders provide us with any orders that were made. Sales contain data of what was actually sold to customers. The visit plan set helps us determine their policy and when they are scheduled to order. The last four datasets are customers, materials, cutoff times, and operating hours. These datasets give us further information about the customer, their policy, and products. Most of the datasets are quite large, with visit plan containing 14 million rows and the smallest being cutoff times with only 220 rows. With all of this data, we will have to do some feature engineering because the target variable has not been defined. The abandoned cart, for this project, is determined by a specific time when the next order must be placed again. We will have to create this order window in order to correctly show cart abandonment.
+
+# Data Cleaning
+
+## Google Analytics Cleaning
+
+```{r ga cleaning}
+# make column names lowercase, get rid of any spaces
+ga_clean <- google_analytics |>
+  clean_names()
+
+ga_clean <- ga_clean |>
+  mutate(
+    # make character columns character types
+    customer_id = trimws(as.character(customer_id)),
+    event_timestamp = as.character(event_timestamp),
+    event_date = as.character(event_date),
+    event_name = as.character(event_name),
+    device_category = as.character(device_category),
+    event_page_name = as.character(event_page_name),
+    event_page_title = as.character(event_page_title),
+    
+    # get day from event date
+    # get it from event timestamp if missing
+    day = as.Date(event_date, format = "%m/%d/%Y"),
+    day = ifelse(is.na(day), as.Date(substr(event_timestamp, 1, 10)), day),
+    day = as.Date(day, origin = "1970-01-01"),  # make sure it's correct class
+    
+    # Normalize event name
+    event_name_norm = tolower(trimws(event_name))
+  )
+
+#Add new column to group events into more comprehensible names to focus on what matters
+ga_clean <- ga_clean |>
+  mutate(event_grouped = case_when(
+    
+    event_name %in% c("AccountSelect_SwitchAccount_Clicked","AccountSelect_SwitchAccount_Completed",
+                      "Close_SwitchAccount_Clicked","login","Login_Cancelled","Login_Clicked",
+                      "Login_Home_Page_Displayed","logout","Logout_Profile_Clicked",
+                      "SwitchAccountPopup_Dispayed") ~ "Account",
+    
+    event_name %in% c("Account_Pressed_Failed","Get_Account_Details_Failed",
+                      "Get_Account_Easy_Order_Failed","Get_Delegated_Account_Failed",
+                      "Is_Account_Blocked_For_Ordering_Failed","Logout_Profile_Failed",
+                      "SSO_Token_Details_Failed",
+                      "Get_User_Details_From_User_Id_Failed") ~ "Account_Failed",
+    
+    event_name %in% c("add_to_cart","CartPage_Displayed","CartProductQuantity_Cart_Changed",
+                      "ContinueShopping_Cart_Clicked","export_cart_click",
+                      "ProductAddtoCart_PDP_Clicked","ProductAddtoCart_PLP_Clicked",
+                      "ProductCheckmark_Cart_Checked","ProductCheckmark_Cart_Unchecked",
+                      "ProductSelected_Cart_Clicked","remove_from_cart","SelectAll_Cart_Checked",
+                      "SelectAll_Cart_Unchecked","update_cart","UpdateCart_Cart_Clicked",
+                      "UpdateCart_Cart_Retrieved","view_cart") ~ "Cart",
+    
+    event_name %in% c("CartProducts_Cart_Retrieve_Failed","Handle_Add_To_Cart_Failed",
+                      "ProductAddtoCart_PLP_Failed","Update_Cart_Details_For_Payment_Failed",
+                      "Update_Cart_Item_With_Price_Data_Failed","Update_Cart_With_Details_Failed",
+                      "Update_Web_Cart_Failed","Error_Get_cart_data","Error_get_webcart_details",
+                      "Get_Active_Cart_Items_Failed","Get_Cart_Count_Failed",
+                      "Get_Product_Quantity_In_Cart_Failed") ~ "Cart_Failed",
+    
+    event_name %in% c("add_payment_info","add_shipping_info","begin_checkout",
+                      "proceed_to_checkout","CheckoutPage_Displayed",
+                      "CheckoutData_CheckoutPage_Retrieved") ~ "Checkout",
+    
+    event_name %in% c("OrderSuccessPage_Displayed","purchase") ~ "Purchase",
+    
+    event_name %in% c("On_Proceed_To_Checkout_Click_Failed","OrderSubmit_CheckoutPage_Failed",
+                      "Process_Payment_Error","Payment_API_Failed","Error_Handle_Payment_Method",
+                      "Get_Payment_Methods_Data_Failed","Get_Payment_Method_Failed",
+                      "Get_SnapPay_Mapping_MetaData_Failed","CheckoutData_Retrieve_Failed",
+                      "cancel_order") ~ "Checkout_Failed",
+    
+    event_name %in% c("Categories_PLP_Retrieved","filter_by","Images_PDP_Reteieved",
+                      "ProductCount_PDP","ProductCount_PLP","ProductsList_PLP_Retrieved",
+                      "select_item","select_promotion","sort_by","view_item","view_item_list",
+                      "view_promotion","view_search_results",
+                      "view_site_search") ~ "Item",
+    
+    event_name %in% c("Images_PDP_Reteieve_Failed","ProductsList_PLP_Retrieve_Failed",
+                      "Get_Assortment_Product_List_Failed",
+                      "Get_Filter_Options_Failed") ~ "Item_Failed",
+    
+    event_name %in% c("InvoiceList_InvoiceTab_Retrieved","InvoiceListFilter_InvoiceTab_Successfull",
+                      "OrderTab_Displayed","pay_invoice_click",
+                      "RecentPayedInvoice_InvoiceTab_Clicked","search_invoice",
+                      "search_order_history") ~ "Orders_Invoices",
+    
+    event_name %in% c("Check_Prod_For_AML_And_Inventory_Failed","Get_Delivery_Dates_Api_Failed",
+                      "Get_Invoice_Data_Failed","Get_Invoice_Details_Failed",
+                      "Get_Oct_Invoice_Failed","Get_Order_History_Failed",
+                      "Get_Order_History_Filter_Options_Failed","Get_Recent_Order_Data_Failed",
+                      "InvoiceList_InvoiceTab_Retrieve_Failed","Create_Delivery_Quantity_Failed",
+                      "Error_Delivery_Method",
+                      "Delete_Order_History_Cache_Failed","refund") ~ "Orders_Invoices_Failed",
+    
+    event_name %in% c("BackClicked_CST","CloseTicket_EST_Clicked","CloseTicket_EST_Successful",
+                      "create_ticket","SupportTab_Displayed","Ticked_CST_Clicked",
+                      "Ticked_EST_Clicked","Ticket_CST_Displayed","Ticket_EST_Displayed",
+                      "TicketList_CST_Retrieved","TicketList_EST_Retrieved",
+                      "TicketListFilter_CST_Successfull","TicketListFilter_EST_Successfull",
+                      "TicketSearch_CST_Clicked","TicketSearch_EST_Clicked") ~ "Tickets",
+    
+    event_name %in% c("Post_Create_ESTCST_Ticket_Failed","TicketList_CST_Retrieve_Failed",
+                      "TicketList_EST_Retrieve_Failed") ~ "Tickets_Failed",
+    
+    event_name %in% c("application_launched","app_remove","app_update","BackClicked_PDP",
+                      "button_click","Close_Profile_Clicked","homepage_register_now",
+                      "nav_link_click","page_view","ProfilePopup_Displayed","screen_view",
+                      "session_start","user_engagement","first_visit") ~ "Engagement",
+    
+    event_name %in% c("Get_Banner_Images_Dashboard_Count","Get_Banner_Images_Plp_Count",
+                      "Get_Banner_Images_Time_Comparison",
+                      "Maintenance_Flag_Successful","os_update") ~ "Other_Success",
+    
+    event_name %in% c("AML_Validation_Failed","Error_post_create_webcart",
+                      "Error_Updating_Session_Delivery","Fetch_Menu_Access_Failed",
+                      "Get_Banner_Images_Failed","Get_Bottler_Meta_Data_Failed",
+                      "Get_Web_Store_Failed","Handle_Auth_Success_Failed",
+                      "handle_save_azure_key_failed","Get_Is_Dom_Enabled_Failed",
+                      "Get_Decision_Tree_Data_Failed") ~ "Other_Failed",
+    
+    TRUE ~ "Other"
+  ))
+```
+
+## Orders cleaning
+
+```{r orders cleaning}
+# make column names lowercase, get rid of any spaces
+orders_clean <- orders |>
+  clean_names()
+
+# make character columns characters, created dates as dates
+# create purchased columns, if order quantity is 0 then no purchase
+orders_clean <- orders_clean |>
+  mutate(
+    customer_id = trimws(as.character(customer_id)),
+    plant_id = as.factor(plant_id),
+    created_date_est = as.Date(created_date_est),
+    created_date_utc = lubridate::ymd_hms(created_date_utc, tz = "UTC"),
+    order_purchased = if_else(order_quantity == 0, "No Purchase", "Purchased", missing = "No Purchase")
+  )
+
+```
+
+## Visits Cleaning
+
+```{r visits cleaning, message = FALSE, warning= FALSE}
+# make column names lowercase, get rid of any spaces
+visits_clean <- visit_plan |>
+  clean_names()
+
+# don't need any information before first date on ga_copy
+# get rid of any anchor dates with NA's
+visits_clean <- visits_clean |>
+  filter(elt_ts >= "2024-05-31",
+         !is.na(anchor_date))
+
+# change frequency to # of days that code correlates to
+visits_clean <- visits_clean |>
+  mutate(
+  frequency = case_when(
+    frequency == "01" ~ 7,
+    frequency == "02" ~ 14,
+    frequency == "04" ~ 28,
+    TRUE ~ NA))
+
+visits_clean <- visits_clean |>
+  mutate(customer_id = trimws(as.character(customer_id)), # make it character type
+         elt_ts = ymd_hms(elt_ts), 
+         # replace any missing or null values with unknown
+         distribution_mode = ifelse(is.na( distribution_mode) |  distribution_mode == ""|  distribution_mode == "null", "Unknown",  distribution_mode),
+         sales_office_desc = ifelse(is.na(sales_office_desc) | sales_office_desc == ""| sales_office_desc == "null", "Unknown",sales_office_desc),
+         sales_office = ifelse(is.na(sales_office) | sales_office == ""| sales_office == "null", "Unknown", sales_office),
+         # date conversions
+         snapshot_date = ymd(snapshot_date),
+         anchor_date = ymd(anchor_date),
+         snapshot_month = floor_date(snapshot_date, unit = "month"),
+         anchor_month = floor_date(anchor_date, unit = "month"))
+```
+
+## Sales Cleaning
+
+```{r sales cleaning}
+# make column names lowercase, get rid of any spaces
+sales_clean <- sales |>
+  clean_names()
+
+# conversion into correct column types
+sales_clean <- sales_clean |>
+  mutate(posting_date = mdy(posting_date),
+         gross_profit_dead_net = as.numeric(gross_profit_dead_net))
+
+# see how many negative profits and revenue there is
+sales_clean |> summarise(
+  neg_profit = sum(gross_profit_dead_net < 0),
+  neg_nsi = sum(nsi_dead_net < 0)
+)
+
+# make column to show negatives
+sales_clean <- sales_clean |>
+  mutate(gross_profit_neg = if_else(gross_profit_dead_net < 0, "Negative", "Positive"),
+         nsi_neg = if_else(nsi_dead_net < 0, "Negative", "Positive"))
+```
+
+# Missing Data
+
+There were several areas in the data sets used for the EDA where data was missing. The largest issue was the visit plan data, which had 3,792 rows where the ANCHOR_DATE failed to parse because the formats were inconsistent or there was missing data. This prevented us from accurately calculating the anchor weekdays and order windows. We’ll need to transform all the values into one format and remove any rows that are missing or can’t be corrected. Another issue with missing data was found in the cutoff times file. There were null values for the sales office and plant ID. For the time being, the invalid rows had deadlines set to 5:00 pm. However, it will be better for us moving forward to remove the rows and use the more accurate order windows. Finally, the google analytics file also had some missing data in the event page title and device brand name columns, but this did not have any significant impact on our EDA, as we can just drop the rows.
+
+# Other Cleaning
+
+```{r}
+customer_clean <- customer %>%
+  mutate(CUSTOMER_NUMBER = as.character(CUSTOMER_NUMBER)
+  )
+
+material_clean <- material %>%
+  mutate(MATERIAL_ID = as.character(MATERIAL_ID)
+  )
+
+hours_clean <- operating_hours %>%
+  mutate(CALLING_ANCHOR_DATE = mdy(CALLING_ANCHOR_DATE),
+         CUSTOMER_NUMBER = as.character(CUSTOMER_NUMBER)
+  )
+```
+
+# Sampling
+
+```{r}
+# --- ROBUST SAMPLING (place after GA/Orders/Visits cleaning, BEFORE Part 1) ---
+# Goal: keep the dataset small but still label-able.
+# Rules:
+#   1) Customer MUST appear in Visit Plan (so we can build policy windows).
+#   2) Customer MUST have EITHER cart intent in GA (add_to_cart) OR any Order
+#      (so there is behavior to label as converted/abandoned). We do NOT require both.
+
+set.seed(123)
+
+# 1) Collect customer IDs by source
+ids_visits    <- unique(visits_clean$customer_id)                            # needed to build windows
+ids_ga_intent <- unique(ga_clean$customer_id[ga_clean$event_name_norm == "add_to_cart"])
+ids_orders    <- unique(orders_clean$customer_id)
+
+# 2) Define the eligible pool:
+#    in Visit Plan AND (has GA intent OR has Orders)
+eligible_ids <- intersect(ids_visits, union(ids_ga_intent, ids_orders))
+
+# 3) Sample up to 50k customers from that pool
+target_n  <- 50000L
+sample_n  <- min(length(eligible_ids), target_n)
+sample_ids <- sample(eligible_ids, size = sample_n, replace = FALSE)
+
+# 4) Filter the big tables to the sampled customers
+ga_clean     <- filter(ga_clean,     customer_id %in% sample_ids)
+orders_clean <- filter(orders_clean, customer_id %in% sample_ids)
+visits_clean <- filter(visits_clean, customer_id %in% sample_ids)
+
+# 5) Quick diagnostics so you know what's in the sample
+has_ga  <- sample_ids %in% ids_ga_intent
+has_ord <- sample_ids %in% ids_orders
+
+cat("Sampled customers: ", length(sample_ids), "\n", sep = "")
+cat("Rows -> GA: ", nrow(ga_clean),
+    " | Orders: ", nrow(orders_clean),
+    " | Visit Plan: ", nrow(visits_clean), "\n", sep = "")
+cat("Breakdown (customers) -> GA intent only: ", sum(has_ga & !has_ord),
+    " | Orders only: ", sum(!has_ga & has_ord),
+    " | Both: ", sum(has_ga & has_ord), "\n", sep = "")
+cat("add_to_cart events (sample): ",
+    sum(ga_clean$event_name_norm == "add_to_cart", na.rm = TRUE), "\n", sep = "")
+```
+
+```{r}
+# --- PART 1: POLICY DATA PREPARATION ---
+
+# The helper function is essential, so we keep it, but the simpler safe_seq_dates is key.
+# New function to safely generate the sequence of POSIXct dates
+safe_seq_dates <- function(start_date, end_date, by_str) {
+  # This function creates a sequence of dates (the end times of the order windows).
+  # It handles cases where start or end dates are missing or invalid, preventing errors.
+  if (is.na(start_date) || is.na(end_date) || start_date >= end_date) {
+    return(list(as_datetime(character(0), tz="UTC")))
+  }
+  return(list(seq.POSIXt(from = start_date, to = end_date, by = by_str)))
+}
+
+# 1. Standardize and Define Policy Anchors (Policy Start and End Dates)
+# We recreate the cutoff_clean step here for completeness and clarity of the join.
+cutoff_lookup <- cutoff_times %>%
+  janitor::clean_names() %>%
+  mutate(CUTOFF_TIME_OF_DAY = hms(cutofftime_c)) %>%
+  filter(sales_office != 0 & plant_id != 0) %>%
+  select(SALES_OFFICE = sales_office, SHIPPING_CONDITION_TIME = shipping_condition_time, 
+         DISTRIBUTION_MODE = distribution_mode, CUTOFF_TIME_OF_DAY)
+
+policy_periods <- visits_clean %>%
+  rename(CUSTOMER_NUMBER = customer_id) %>%
+  
+  # Join customer details and cutoff times to get the full policy definition
+  left_join(
+    customer_clean %>% select(CUSTOMER_NUMBER, SALES_OFFICE, DISTRIBUTION_MODE_DESCRIPTION, SHIPPING_CONDITIONS_DESCRIPTION),
+    by = "CUSTOMER_NUMBER"
+  ) %>%
+  left_join(
+    cutoff_lookup, 
+    by = c("sales_office" = "SALES_OFFICE", "distribution_mode" = "DISTRIBUTION_MODE", 
+           "SHIPPING_CONDITIONS_DESCRIPTION" = "SHIPPING_CONDITION_TIME")
+  ) %>%
+  
+  # Calculate the exact policy start datetime (Anchor Date + Cutoff Time)
+  mutate(
+    CUTOFF_TIME_OF_DAY = replace_na(CUTOFF_TIME_OF_DAY, hms("17:00:00")), # Default to 5 PM
+    ANCHOR_DATETIME = as_datetime(anchor_date, tz="UTC") + 
+      hours(hour(CUTOFF_TIME_OF_DAY)) + minutes(minute(CUTOFF_TIME_OF_DAY)) + seconds(second(CUTOFF_TIME_OF_DAY))
+  ) %>%
+  
+  # Group and Define the Policy End Time
+  # The policy ends when the *next* policy anchor date/time starts.
+  group_by(CUSTOMER_NUMBER) %>%
+  arrange(CUSTOMER_NUMBER, ANCHOR_DATETIME) %>% 
+  distinct(CUSTOMER_NUMBER, ANCHOR_DATETIME, .keep_all = TRUE) %>% # Remove duplicates at the exact same time
+  mutate(
+    POLICY_END_DATETIME = lead(ANCHOR_DATETIME), # End date is the start of the next policy
+    ORDER_WINDOW_START_POLICY = ANCHOR_DATETIME,
+    frequency_days = frequency
+  ) %>%
+  ungroup() %>%
+  
+  # Select the final, cleaned policy periods
+  select(CUSTOMER_NUMBER, ORDER_WINDOW_START_POLICY, POLICY_END_DATETIME, frequency_days) %>%
+  filter(!is.na(ORDER_WINDOW_START_POLICY), !is.na(frequency_days)) %>%
+  # Remove periods that are too short to generate a time sequence
+  mutate(DURATION_CHECK = difftime(POLICY_END_DATETIME, ORDER_WINDOW_START_POLICY, units = "secs")) %>%
+  filter(is.na(POLICY_END_DATETIME) | DURATION_CHECK > 1) %>% 
+  select(-DURATION_CHECK)
+
+
+# --- PART 2: GENERATE ALL ORDER WINDOWS ---
+
+order_window_master <- policy_periods %>%
+  rowwise() %>% # This is necessary for the next step to work row-by-row
+  mutate(
+    # Set the ultimate end date for open policies (those with NA POLICY_END_DATETIME)
+    max_ga_date = as_datetime(max(ga_clean$day, na.rm = TRUE) + days(max(frequency_days, na.rm=TRUE) * 2), tz="UTC"),
+    effective_order_end = coalesce(POLICY_END_DATETIME - seconds(1), max_ga_date),
+    
+    # Generate a list of expected window end times (The most complex step)
+    expected_order_end_times = safe_seq_dates(
+        start_date = ORDER_WINDOW_START_POLICY, 
+        end_date = effective_order_end, 
+        by_str = paste(frequency_days, "days")
+    )
+  ) %>%
+  ungroup() %>%
+  unnest(cols = expected_order_end_times) %>% # Expand the list of dates into new rows
+  
+  # Calculate the actual window start time based on the end time
+  mutate(
+    ORDER_WINDOW_END = expected_order_end_times,
+    ORDER_WINDOW_START = ORDER_WINDOW_END - days(frequency_days)
+  ) %>%
+  
+  # Final selection of unique, valid windows
+  select(CUSTOMER_NUMBER, ORDER_WINDOW_START, ORDER_WINDOW_END) %>%
+  distinct()
+
+
+# --- PART 3: DETERMINE TARGET VARIABLE (ABANDONED/NOT ABANDONED) ---
+
+# 3.1 Identify windows with Cart Intent (Non-Equi Join 1)
+cart_activity_windows <- ga_clean %>%
+  filter(event_name %in% c("add_to_cart", "ProductAddtoCart_PLP_Clicked", "ProductAddtoCart_PDP_Clicked")) %>%
+  mutate(EVENT_TIMESTAMP = ymd_hms(event_timestamp, tz="UTC")) %>%
+  select(CUSTOMER_ID = customer_id, EVENT_TIMESTAMP) %>%
+  
+  # Join cart events to the window they occurred in
+  left_join(
+    order_window_master %>% rename(CUSTOMER_ID = CUSTOMER_NUMBER), 
+    by = join_by(CUSTOMER_ID, 
+                 closest(EVENT_TIMESTAMP >= ORDER_WINDOW_START),
+                 closest(EVENT_TIMESTAMP < ORDER_WINDOW_END))
+  ) %>%
+  filter(!is.na(ORDER_WINDOW_START)) %>% 
+  select(CUSTOMER_ID, ORDER_WINDOW_START, ORDER_WINDOW_END) %>%
+  distinct() %>%
+  mutate(HAD_CART_ACTIVITY = TRUE)
+
+
+# 3.2 Identify windows with Purchase (Non-Equi Join 2)
+purchase_made_windows <- orders_clean %>%
+  filter(order_purchased == "Purchased") %>%
+  mutate(EVENT_TIMESTAMP = created_date_utc) %>%
+  select(CUSTOMER_ID = customer_id, EVENT_TIMESTAMP) %>%
+  
+  # Join purchases to the window they occurred in
+  left_join(
+    order_window_master %>% rename(CUSTOMER_ID = CUSTOMER_NUMBER), 
+    by = join_by(CUSTOMER_ID, 
+                 closest(EVENT_TIMESTAMP >= ORDER_WINDOW_START),
+                 closest(EVENT_TIMESTAMP < ORDER_WINDOW_END))
+  ) %>%
+  filter(!is.na(ORDER_WINDOW_START)) %>%
+  select(CUSTOMER_ID, ORDER_WINDOW_START, ORDER_WINDOW_END) %>%
+  distinct() %>%
+  mutate(MADE_PURCHASE = TRUE)
+
+
+# 3.3 Consolidate and Create the Target Variable
+final_window_target <- order_window_master %>%
+  rename(CUSTOMER_ID = CUSTOMER_NUMBER) %>%
+  
+  # Merge the activity and purchase flags back onto the master list of windows
+  left_join(cart_activity_windows, by = c("CUSTOMER_ID", "ORDER_WINDOW_START", "ORDER_WINDOW_END")) %>%
+  left_join(purchase_made_windows, by = c("CUSTOMER_ID", "ORDER_WINDOW_START", "ORDER_WINDOW_END")) %>%
+  
+  # Clean NA flags to FALSE
+  mutate(
+    HAD_CART_ACTIVITY = replace_na(HAD_CART_ACTIVITY, FALSE),
+    MADE_PURCHASE = replace_na(MADE_PURCHASE, FALSE)
+  ) %>%
+  
+  # Create the final target variable (The core definition)
+  mutate(
+    TARGET_ABANDONED = case_when(
+      HAD_CART_ACTIVITY == TRUE & MADE_PURCHASE == FALSE ~ 1, # Abandoned (Intent + No Purchase)
+      TRUE ~ 0 # Converted (Intent + Purchase) OR No Intent (No Activity)
+    )
+  )
+
+# --- PART 4: FINAL JOIN FOR MODELING DATASET ---
+
+master_model_data <- ga_clean %>%
+    mutate(EVENT_TIMESTAMP = ymd_hms(event_timestamp, tz="UTC")) %>%
+    
+    # 1. Join GA Events to their corresponding window
+    left_join(
+        order_window_master %>% rename(CUSTOMER_ID = CUSTOMER_NUMBER),
+        # Use explicit column mapping for case consistency (customer_id vs CUSTOMER_ID)
+        by = join_by(customer_id == CUSTOMER_ID,
+                     closest(EVENT_TIMESTAMP >= ORDER_WINDOW_START),
+                     closest(EVENT_TIMESTAMP < ORDER_WINDOW_END))
+    ) %>%
+    
+    # 2. Join the final target status back to the events
+    left_join(
+        final_window_target %>% select(CUSTOMER_ID, ORDER_WINDOW_START, ORDER_WINDOW_END, TARGET_ABANDONED),
+        by = c("customer_id" = "CUSTOMER_ID", "ORDER_WINDOW_START", "ORDER_WINDOW_END")
+    ) %>%
+    
+    # Select columns for modeling
+    select(
+        CUSTOMER_ID = customer_id, EVENT_TIMESTAMP, event_name, event_grouped, device_category,
+        ORDER_WINDOW_START, ORDER_WINDOW_END, TARGET_ABANDONED)
+```
+
+## Logistic Regression
+
+```{r}
+# Rebuild minimal behavior features
+if (!exists("behavior_features") || nrow(behavior_features) == 0L) {
+ # Normalize event names and sort events within customer by time and window 
+mm <- master_model_data %>%
+    mutate(event_name_norm = tolower(trimws(event_name))) %>%
+    arrange(CUSTOMER_ID, ORDER_WINDOW_START, EVENT_TIMESTAMP)
+
+ # Aggregate to one row per customer and order window by counting key behaviors
+behavior_features <- mm %>%
+  group_by(CUSTOMER_ID, ORDER_WINDOW_START, ORDER_WINDOW_END, TARGET_ABANDONED) %>%
+  summarise(
+    total_events = n(),
+    add_to_cart_count = sum(event_name_norm == "add_to_cart", na.rm = TRUE),
+    remove_count = sum(event_name_norm == "remove_from_cart", na.rm = TRUE),
+    update_cart_count = sum(event_name_norm == "update_cart", na.rm = TRUE),
+    view_item_count = sum(event_name_norm == "view_item", na.rm = TRUE),
+    view_list_count = sum(event_name_norm == "view_item_list", na.rm = TRUE),
+    begin_ck_count = sum(event_name_norm == "begin_checkout", na.rm = TRUE),
+    proceed_ck_count = sum(event_name_norm == "proceed_to_checkout", na.rm = TRUE),
+    # First seen positions through event order within the window and NA if never happened.
+    idx_add = {w <- which(event_name_norm == "add_to_cart"); if (length(w)) w[1] else NA_integer_},
+    idx_begin = {w <- which(event_name_norm == "begin_checkout"); if (length(w)) w[1] else NA_integer_ },
+    idx_proceed = {w <- which(event_name_norm == "proceed_to_checkout"); if (length(w)) w[1] else NA_integer_},
+    idx_remove = {w <- which(event_name_norm == "remove_from_cart"); if (length(w)) w[1] else NA_integer_ },
+    .groups = "drop") %>%
+  # Check if: They ever entered checkout and if they removed items after adding them,
+  # They removed items after adding them,
+  # Browsed a lot but never started the checkout
+  mutate(made_checkout_progress   = as.integer(!is.na(idx_begin) | !is.na(idx_proceed)),
+    remove_after_add         = as.integer(!is.na(idx_add) & !is.na(idx_remove) & idx_remove > idx_add),
+    browse_heavy_no_checkout = as.integer((view_item_count + view_list_count) >= 5 &
+                                            made_checkout_progress == 0)) %>%
+  select(-idx_add, -idx_begin, -idx_proceed, -idx_remove) %>%
+  ungroup()}
+
+# Clean and drop NA targets and replace any remaining NA with 0
+bf <- behavior_features %>%
+  filter(!is.na(TARGET_ABANDONED)) %>%
+  mutate(across(where(is.numeric), ~ ifelse(is.na(.), 0, .)))
+
+# If nothing left, print
+if (nrow(bf) == 0L) {
+  print("No rows after cleaning TARGET_ABANDONED. Check upstream labeling.")
+} else {
+
+# Split 80% to train the model 20% to test
+set.seed(123)
+idx <- sample(seq_len(nrow(bf)), size = floor(0.8 * nrow(bf)))
+train <- bf[idx, ]
+test  <- bf[-idx, ]
+
+# Fit logistic regression model
+logit_model <- glm(
+  TARGET_ABANDONED ~
+    add_to_cart_count + remove_count + update_cart_count +
+    view_item_count + view_list_count +
+    begin_ck_count +
+    browse_heavy_no_checkout +
+    remove_after_add +
+    total_events,
+  data = train, family = binomial)
+
+# Turn model probabilities into class predictions
+prob <- predict(logit_model, newdata = test, type = "response")
+roc_obj <- pROC::roc(test$TARGET_ABANDONED, prob)
+thr     <- as.numeric(pROC::coords(roc_obj, "best", ret = "threshold"))
+pred    <- ifelse(prob >= thr, 1L, 0L)
+
+# Metrics
+accuracy <- mean(pred == test$TARGET_ABANDONED)
+auc_val  <- as.numeric(pROC::auc(roc_obj))
+
+# Top decile lift to see how concentrated are abandons in the riskiest 10%?
+cut90        <- stats::quantile(prob, 0.90, na.rm = TRUE)
+overall_rate <- mean(test$TARGET_ABANDONED)
+top10_rate   <- mean(test$TARGET_ABANDONED[prob >= cut90])
+lift_pp      <- 100 * (top10_rate - overall_rate)
+
+# Confusion matrix at threshold
+TP <- sum(pred == 1 & test$TARGET_ABANDONED == 1)
+TN <- sum(pred == 0 & test$TARGET_ABANDONED == 0)
+FP <- sum(pred == 1 & test$TARGET_ABANDONED == 0)
+FN <- sum(pred == 0 & test$TARGET_ABANDONED == 1)
+
+metrics_tbl <- data.frame(
+  Threshold = round(thr, 3),
+  Accuracy  = round(accuracy, 3),
+  AUC       = round(auc_val, 3),
+  Overall_Abandon_Rate = round(overall_rate, 3),
+  TopDecile_Abandon_Rate = round(top10_rate, 3),
+  Lift_pp   = round(lift_pp, 1),
+  TP = TP, FP = FP, TN = TN, FN = FN)
+print(metrics_tbl)
+
+# Make coefficients easy to read with odds ratios
+# Greater than 1 increases odds, less decreases
+coefs <- summary(logit_model)$coefficients
+interpret <- data.frame(
+  Feature   = rownames(coefs),
+  OddsRatio = round(exp(coefs[, "Estimate"]), 3),
+  PValue    = round(coefs[, "Pr(>|z|)"], 4),
+  row.names = NULL) %>% 
+  arrange(desc(abs(log(OddsRatio))))
+  print(head(interpret, 12))
+
+# Plot ROC
+print(plot(roc_obj, main = paste0("ROC (AUC = ", round(auc_val, 3), ")")))
+
+# Plot lift bars to compare abandonrate between overall and top 10% highest risk windows
+lift_df <- data.frame(
+  Segment = c("Overall", "Top 10% by Risk"),
+  Rate    = c(overall_rate, top10_rate))
+
+  p_lift <- ggplot(lift_df, aes(x = Segment, y = Rate)) +
+    geom_col() +
+    geom_text(aes(label = scales::percent(Rate, accuracy = 0.1)), vjust = -0.2) +
+    ylim(0, max(lift_df$Rate) * 1.15) +
+    labs(title = "Abandonment Rate: Overall vs. Top-Decile", y = "Abandonment Rate", x = "") +
+    theme_minimal()
+  print(p_lift)
+
+# Top 10 odds ratio bars to see which behaviors push risk up and down the most
+or_plot_df <- interpret %>%
+  dplyr::filter(Feature != "(Intercept)") %>%
+  mutate(
+    Direction = ifelse(OddsRatio >= 1, "Increases Odds", "Decreases Odds"),
+    Feature   = gsub("_", " ", Feature)
+  ) %>%
+  arrange(desc(abs(log(OddsRatio)))) %>%
+  head(10)
+
+p_or <- ggplot(or_plot_df, aes(x = reorder(Feature, log(OddsRatio)), y = log(OddsRatio), fill = Direction)) +
+  geom_col() +
+  coord_flip() +
+  labs(title = "Top Behavioral Drivers (log Odds Ratio)",
+        x = "", y = "log(OR)  (positive = higher abandonment risk)") +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+print(p_or)}
+```
+
+## Random Forest
+
+```{r}
+# Keep only rows that have a label and replace any NA numbers with 0
+bf <- behavior_features %>%
+  filter(!is.na(TARGET_ABANDONED)) %>%                       
+  mutate(across(where(is.numeric), ~ ifelse(is.na(.), 0, .))) %>%  
+  ungroup()
+
+cat("Rows available for modeling:", nrow(bf), "\n")
+if (nrow(bf) == 0L) stop("No rows after cleaning. Check upstream labeling/joins.")
+
+# Split 80% to train the model 20% to test
+set.seed(123)
+idx <- sample(seq_len(nrow(bf)), floor(0.8 * nrow(bf)))
+train <- bf[idx, ]
+test <- bf[-idx, ]
+
+# Ranger expects the target as a factor for classification
+train$TARGET_ABANDONED <- factor(train$TARGET_ABANDONED, levels = c(0,1))
+test$TARGET_ABANDONED  <- factor(test$TARGET_ABANDONED,  levels = c(0,1))
+
+# Ttell the model which behavioral signals to learn from
+rf_formula <- TARGET_ABANDONED ~
+  add_to_cart_count + remove_count + update_cart_count +
+  view_item_count + view_list_count +
+  begin_ck_count + proceed_ck_count +
+  browse_heavy_no_checkout + remove_after_add +
+  total_events
+
+# Train random forest with 300 trees 
+p <- ncol(model.matrix(rf_formula, data = train)) - 1
+rf_model <- ranger::ranger(
+  rf_formula,
+  data = train,
+  num.trees = 300,
+  mtry = floor(sqrt(p)),
+  min.node.size = 20,
+  probability = TRUE,          
+  importance = "impurity",    
+  seed = 123)
+
+# Get abandonment probabilities on the test set 
+rf_probs <- predict(rf_model, data = test)$predictions[, "1"]   
+y_true   <- as.integer(as.character(test$TARGET_ABANDONED))     
+
+# Metrics at simple 0.5 cutoff 
+thr     <- 0.5
+rf_pred <- ifelse(rf_probs >= thr, 1L, 0L)
+acc     <- mean(rf_pred == y_true)
+
+# AUC to measure ranking quality 
+roc_obj <- pROC::roc(y_true, rf_probs)
+auc_val <- as.numeric(pROC::auc(roc_obj))
+
+# Confusion matrix pieces + precision/recall
+TP <- sum(rf_pred == 1 & y_true == 1)
+TN <- sum(rf_pred == 0 & y_true == 0)
+FP <- sum(rf_pred == 1 & y_true == 0)
+FN <- sum(rf_pred == 0 & y_true == 1)
+
+metrics_tbl <- data.frame(
+  Accuracy  = round(acc, 3),
+  AUC       = round(auc_val, 3),
+  Precision = round(ifelse((TP+FP)==0, NA, TP/(TP+FP)), 3),
+  Recall    = round(ifelse((TP+FN)==0, NA, TP/(TP+FN)), 3),
+  TP = TP, FP = FP, TN = TN, FN = FN
+)
+print(metrics_tbl)
+
+#  Top-decile lift and find abandonment rate vs overall on 10% riskiest windows
+cut90   <- stats::quantile(rf_probs, 0.90, na.rm = TRUE)
+overall <- mean(y_true)                       
+top10   <- mean(y_true[rf_probs >= cut90])     
+lift_pp <- 100 * (top10 - overall)              
+lift_tbl <- data.frame(
+  Overall_Rate = round(overall, 3),
+  Top10_Rate   = round(top10, 3),
+  Lift_pp      = round(lift_pp, 1)
+)
+print(lift_tbl)
+
+# Show top 10 behaviors the forest leaned on
+imp <- sort(rf_model$variable.importance, decreasing = TRUE)
+imp_df <- data.frame(Feature = names(imp), Importance = as.numeric(imp), row.names = NULL) %>% head(10)
+
+p_imp <- ggplot(imp_df, aes(x = reorder(Feature, Importance), y = Importance)) +
+  geom_col() +
+  coord_flip() +
+  labs(title = "Random Forest — Top Feature Importance",
+       x = "", y = "Importance") +
+  theme_minimal()
+print(p_imp)
+
+# ROC curve
+print(plot(roc_obj, main = paste0("Random Forest ROC (AUC = ", round(auc_val, 3), ")")))
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
